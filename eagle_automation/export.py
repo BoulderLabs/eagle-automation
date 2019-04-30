@@ -87,6 +87,8 @@ class EagleScriptExport:
         script_string = ';'.join(script)
 
         cmd = [config.EAGLE, "-C" + script_string, in_path]
+        if config.XVFB:
+            cmd = [config.XVFB] + cmd
         try:
             subprocess.call(cmd)
         except FileNotFoundError:

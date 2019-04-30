@@ -5,13 +5,13 @@
 USAGE: {prog} {command} [--page=N] [--output=F] [--semantic] <from-file> <to-file>
 
 Parameters:
-	<from-file>	 File to diff from
-	<to-file>	   File to diff to
+    <from-file>  File to diff from
+    <to-file>      File to diff to
 
 Options:
-	-p,--page=N	   Page to compare on multi-page schematics [default: 1]
-	-o,--output=F  File to output diff into
-	-s,--semantic  Do a semantic diff (for library diffs)
+    -p,--page=N    Page to compare on multi-page schematics [default: 1]
+    -o,--output=F  File to output diff into
+    -s,--semantic  Do a semantic diff (for library diffs)
 
 Copyright (C) 2015  Bernard Pratz <guyzmo+github@m0g.net>
 Copyright (C) 2014  Tomaz Solc <tomaz.solc@tablix.org>
@@ -31,7 +31,7 @@ import logging
 
 log = logging.getLogger('pea').getChild(__name__)
 
-from PIL import Image, ImageOps, ImageChops
+from PIL import Image, ImageOps, ImageChops, ImageDraw, ImageFont
 
 from eagle_automation.config import config
 from eagle_automation.export import get_extension, BadExtension, EaglePNGExport, EagleDirectoryExport
@@ -42,8 +42,8 @@ def to_png(in_path, page):
         extension = in_path.split('.')[-1].lower()
         if extension == 'brd':
             layers = config.LAYERS.values()
-            out_paths = [os.path.join(workdir, layer + '.png')
-                         for layer in config.LAYERS.keys()]
+            out_paths = [os.path.join(workdir, '%04d-' % i + layer + '.png')
+                         for i, layer in enumerate(config.LAYERS.keys()) ]
         elif extension == 'sch':
             layers = [{'layers': ['ALL']}]
             out_paths = [os.path.join(workdir, 'all.png')]
@@ -55,14 +55,10 @@ def to_png(in_path, page):
         export.set_page(page)
         export.export(in_path, layers, out_paths)
 
-        oim = None
+        oim = {}
         for i, out_path in enumerate(out_paths):
             im = Image.open(out_path).convert("L")
-            if oim is None:
-                oim = im
-            else:
-                oim = Image.blend(oim, im, 1.0 / (1.0 + i))
-
+            oim[os.path.basename(out_path)] = im
             os.unlink(out_path)
 
         return oim
@@ -132,37 +128,61 @@ def diff_visual(from_file, to_file, page=0, output=None):
 
         for page in range(first, last + 1):
             log.info("Checking page {} of {}".format(page, last))
-            a_im = to_png(from_file, page=page)
-            b_im = to_png(to_file, page=page)
 
-            # make the sizes equal
-            # if a sheet contains the filename, it is updated with the temporary name
-            # and may thus change the size of the image
-            width = max((a_im.size[0], b_im.size[0]))
-            height = max((a_im.size[1], b_im.size[1]))
-            a_im2 = Image.new("L", (width, height))
-            a_im2.paste(a_im, (0, 0))
-            a_im = a_im2
-            a_im2 = None
-            b_im2 = Image.new("L", (width, height))
-            b_im2.paste(b_im, (0, 0))
-            b_im = b_im2
-            b_im2 = None
+            a_im_l = to_png(from_file, page=page)
+            b_im_l = to_png(to_file, page=page)
 
-            added = ImageOps.autocontrast(ImageChops.subtract(b_im, a_im), 0)
-            deled = ImageOps.autocontrast(ImageChops.subtract(a_im, b_im), 0)
-            same = Image.blend(a_im, b_im, 0.5)
+            bbox = None
+            for k in sorted(a_im_l.keys()):
+                a_im = a_im_l[k]
+                b_im = b_im_l[k]
 
-            deled = ImageOps.colorize(deled, "#000", "#f00")
-            added = ImageOps.colorize(added, "#000", "#00f")
-            same = ImageOps.colorize(same, "#000", "#777")
+                # make the sizes equal
+                # if a sheet contains the filename, it is updated with the temporary name
+                # and may thus change the size of the image
+                width = max((a_im.size[0], b_im.size[0]))
+                height = max((a_im.size[1], b_im.size[1]))
+                a_im2 = Image.new("L", (width, height))
+                a_im2.paste(a_im, (0, 0))
+                a_im = a_im2
+                a_im2 = None
+                b_im2 = Image.new("L", (width, height))
+                b_im2.paste(b_im, (0, 0))
+                b_im = b_im2
+                b_im2 = None
 
-            im = ImageChops.add(ImageChops.add(added, deled), same)
-            fname = "{from_file}-{to_file}-page_{page}.pdf".format(from_file=os.path.basename(from_file.split('.')[0]),
-                                                                   to_file=os.path.basename(to_file.split('.')[0]),
-                                                                   page=page)
-            im.save(os.path.join(workdir, fname))
-            pages.append(os.path.join(workdir, fname))
+                if bbox is None:
+                    bb_a = a_im.getbbox()
+                    bb_b = b_im.getbbox()
+                    bbox = (min(bb_a[0], bb_b[0]),
+                            min(bb_a[1], bb_b[1]),
+                            max(bb_a[2], bb_b[2]),
+                            max(bb_a[3], bb_b[3]))
+                if bbox:
+                    a_im = a_im.crop( bbox )
+                    b_im = b_im.crop( bbox )
+
+                added = ImageOps.autocontrast(ImageChops.subtract(b_im, a_im), 0)
+                deled = ImageOps.autocontrast(ImageChops.subtract(a_im, b_im), 0)
+
+                a_mask = added.point(lambda p: p == 0 and 255).convert("1")
+                d_mask = deled.point(lambda p: p == 0 and 255).convert("1")
+
+                deled = ImageOps.colorize(deled, "#000", "#33f")
+                added = ImageOps.colorize(added, "#000", "#f33")
+                same = ImageOps.colorize(a_im, "#000", "#aaa")
+
+                c1 = ImageChops.composite(same, deled, d_mask)
+                im = ImageChops.composite(c1, added, a_mask)
+                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 32)
+                ImageDraw.Draw(im).text( (20,20), '%s' % k[5:-4], (0, 255, 0), font=font)
+                fname = "{from_file}-{to_file}-page_{page}-{type}.pdf".format(
+                    from_file=os.path.basename(from_file.split('.')[0]),
+                    to_file=os.path.basename(to_file.split('.')[0]),
+                    page=page,
+                    type=k)
+                im.save(os.path.join(workdir, fname))
+                pages.append(os.path.join(workdir, fname))
 
         if len(pages) > 0:
             pdf_concatenate(output, pages)
@@ -173,11 +193,11 @@ def diff_visual(from_file, to_file, page=0, output=None):
                 except FileNotFoundError as err:
                     log.warning("Cannot find open utility: `{}`".format(config.OPEN))
                     log.warning("Open your file manually to check it")
-                input("Press enter to flush all outputs")
+                #input("Press enter to flush all outputs")
         else:
             log.error("No diff output.")
 
-        workdir.cleanup()
+        #workdir.cleanup()
 
 
 def diff_text(from_file, to_file):
